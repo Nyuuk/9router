@@ -7,6 +7,7 @@ import { useState, useEffect, useMemo } from "react";
 import PropTypes from "prop-types";
 import { Toggle, ModelSelectModal, SegmentedControl } from "@/shared/components";
 import { PROVIDER_DISPLAY } from "@/shared/constants/providersDisplay.js";
+import { cn } from "@/shared/utils/cn";
 
 export default function KeyAccessControls({ apiKey, onChange, onRequestRestrict }) {
   const access = apiKey.access || {
@@ -22,16 +23,22 @@ export default function KeyAccessControls({ apiKey, onChange, onRequestRestrict 
   const [pickerOpen, setPickerOpen] = useState(false);
   const [activeProviders, setActiveProviders] = useState([]);
   const [modelAliases, setModelAliases] = useState({});
+  const [nodeNames, setNodeNames] = useState({});
   const [loadingProviders, setLoadingProviders] = useState(false);
+  const [isConfigOpen, setIsConfigOpen] = useState(false);
 
-  // Load providers and model aliases when restricted mode is active
+  // Load providers, model aliases, and provider nodes when restricted mode is active
   useEffect(() => {
     if (!access.restricted) return;
     if (activeProviders.length > 0) return;
     let cancelled = false;
     setLoadingProviders(true);
-    Promise.all([fetch("/api/providers"), fetch("/api/models/alias")])
-      .then(async ([providersRes, aliasRes]) => {
+    Promise.all([
+      fetch("/api/providers"),
+      fetch("/api/models/alias"),
+      fetch("/api/provider-nodes")
+    ])
+      .then(async ([providersRes, aliasRes, nodesRes]) => {
         if (cancelled) return;
         if (providersRes.ok) {
           const data = await providersRes.json();
@@ -41,8 +48,16 @@ export default function KeyAccessControls({ apiKey, onChange, onRequestRestrict 
           const data = await aliasRes.json();
           setModelAliases(data.aliases || {});
         }
+        if (nodesRes?.ok) {
+          const data = await nodesRes.json();
+          const mapping = {};
+          for (const n of data.nodes || []) {
+            if (n.id && n.name) mapping[n.id] = n.name;
+          }
+          setNodeNames(mapping);
+        }
       })
-      .catch((error) => console.log("Error loading providers/aliases:", error))
+      .catch((error) => console.log("Error loading providers/aliases/nodes:", error))
       .finally(() => {
         if (!cancelled) setLoadingProviders(false);
       });
@@ -55,9 +70,21 @@ export default function KeyAccessControls({ apiKey, onChange, onRequestRestrict 
     setPickerOpen(true);
     if (activeProviders.length === 0) {
       try {
-        const [providersRes, aliasRes] = await Promise.all([fetch("/api/providers"), fetch("/api/models/alias")]);
+        const [providersRes, aliasRes, nodesRes] = await Promise.all([
+          fetch("/api/providers"),
+          fetch("/api/models/alias"),
+          fetch("/api/provider-nodes")
+        ]);
         if (providersRes.ok) setActiveProviders((await providersRes.json()).connections || []);
         if (aliasRes.ok) setModelAliases((await aliasRes.json()).aliases || {});
+        if (nodesRes?.ok) {
+          const data = await nodesRes.json();
+          const mapping = {};
+          for (const n of data.nodes || []) {
+            if (n.id && n.name) mapping[n.id] = n.name;
+          }
+          setNodeNames(mapping);
+        }
       } catch (error) {
         console.log("Error loading picker data:", error);
       }
@@ -158,25 +185,80 @@ export default function KeyAccessControls({ apiKey, onChange, onRequestRestrict 
     }
   };
 
+  const isBlocked = allowedProviders.length === 0 && allow.length === 0;
+
+  const summaryBadge = useMemo(() => {
+    const pCount = allowedProviders.length;
+    const mCount = allow.length;
+    if (pCount === 0 && mCount === 0) {
+      return "0 providers, 0 models allowed";
+    }
+    if (pCount > 0 && mCount === 0) {
+      return `${pCount} provider${pCount > 1 ? "s" : ""}, all models allowed`;
+    }
+    if (pCount === 0 && mCount > 0) {
+      return `All providers, ${mCount} model${mCount > 1 ? "s" : ""} allowed`;
+    }
+    return `${pCount} provider${pCount > 1 ? "s" : ""}, ${mCount} model${mCount > 1 ? "s" : ""} allowed`;
+  }, [allowedProviders.length, allow.length]);
+
   return (
     <div className="mt-2" data-testid="key-access">
-      <Toggle
-        size="sm"
-        checked={access.restricted}
-        label="Restrict access"
-        onChange={(checked) =>
-          checked
-            ? onRequestRestrict()
-            : onChange({
+      <div className="flex flex-wrap items-center justify-between gap-2.5">
+        <Toggle
+          size="sm"
+          checked={access.restricted}
+          label="Restrict access"
+          onChange={(checked) => {
+            if (checked) {
+              setIsConfigOpen(true);
+              onRequestRestrict();
+            } else {
+              setIsConfigOpen(false);
+              onChange({
                 restricted: false,
                 allow,
                 allowedProviders,
                 allowedConnections,
-              })
-        }
-      />
-      {access.restricted && (
-        <div className="mt-3 space-y-4">
+              });
+            }
+          }}
+        />
+
+        {access.restricted && (
+          <div className="flex items-center gap-2">
+            <span
+              className={cn(
+                "inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium border",
+                isBlocked
+                  ? "bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/20"
+                  : "bg-primary/10 text-primary border border-primary/20"
+              )}
+            >
+              {summaryBadge}
+            </span>
+            <button
+              type="button"
+              onClick={() => setIsConfigOpen((prev) => !prev)}
+              aria-expanded={isConfigOpen}
+              className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-lg border border-black/10 dark:border-white/10 hover:bg-black/5 dark:hover:bg-white/5 text-text-main transition-colors select-none"
+            >
+              <span>Configure Access</span>
+              <span
+                className={cn(
+                  "material-symbols-outlined text-[16px] text-text-muted transition-transform duration-200",
+                  isConfigOpen ? "rotate-180" : ""
+                )}
+              >
+                expand_more
+              </span>
+            </button>
+          </div>
+        )}
+      </div>
+
+      {access.restricted && isConfigOpen && (
+        <div className="mt-3 space-y-4 rounded-xl border border-black/[0.08] dark:border-white/[0.08] bg-black/[0.01] dark:bg-white/[0.01] p-3.5">
           {/* Models & Combos Section */}
           <div className="rounded-xl border border-black/[0.06] bg-black/[0.02] p-3 dark:border-white/[0.06] dark:bg-white/[0.02]">
             <div className="flex items-center justify-between mb-2">
@@ -185,6 +267,7 @@ export default function KeyAccessControls({ apiKey, onChange, onRequestRestrict 
                 Allowed Combos & Models
               </span>
               <button
+                type="button"
                 onClick={openPicker}
                 className="flex items-center gap-1 rounded-lg border border-dashed border-primary/40 bg-primary/5 px-2 py-0.5 text-xs font-medium text-primary hover:bg-primary/10 transition-colors"
               >
@@ -207,6 +290,7 @@ export default function KeyAccessControls({ apiKey, onChange, onRequestRestrict 
                 >
                   {entry}
                   <button
+                    type="button"
                     onClick={() => removeModel(entry)}
                     className="rounded text-text-muted hover:text-red-500"
                     title={`Remove ${entry}`}
@@ -241,7 +325,11 @@ export default function KeyAccessControls({ apiKey, onChange, onRequestRestrict 
               <div className="space-y-2 mt-2">
                 {providerGroups.map(([providerId, conns]) => {
                   const isAllowed = allowedProviders.includes(providerId);
-                  const providerName = PROVIDER_DISPLAY[providerId]?.name || providerId;
+                  const providerName =
+                    nodeNames[providerId] ||
+                    conns[0]?.providerSpecificData?.nodeName ||
+                    PROVIDER_DISPLAY[providerId]?.name ||
+                    providerId;
                   const connIds = conns.map((c) => c.id);
                   const selectedThisProvider = allowedConnections.filter((id) => connIds.includes(id));
                   const isSpecific = selectedThisProvider.length > 0;
@@ -263,10 +351,13 @@ export default function KeyAccessControls({ apiKey, onChange, onRequestRestrict 
                             onChange={() => toggleProvider(providerId)}
                             className="h-3.5 w-3.5 rounded border-black/20 text-primary focus:ring-primary dark:border-white/20"
                           />
-                          <span className="text-xs font-medium text-text-main truncate">
+                          <span className="text-xs font-medium text-text-main truncate" title={providerName}>
                             {providerName}
                           </span>
-                          <span className="rounded bg-black/[0.05] dark:bg-white/[0.05] px-1.5 py-0.5 text-[10px] text-text-muted font-mono">
+                          <span
+                            className="rounded bg-black/[0.05] dark:bg-white/[0.05] px-1.5 py-0.5 text-[10px] text-text-muted font-mono max-w-[140px] truncate"
+                            title={providerId}
+                          >
                             {providerId}
                           </span>
                         </label>
@@ -329,7 +420,7 @@ export default function KeyAccessControls({ apiKey, onChange, onRequestRestrict 
             )}
           </div>
 
-          {allow.length === 0 && allowedProviders.length === 0 && (
+          {isBlocked && (
             <p className="text-xs text-orange-500 font-medium">
               No combos, models, or providers allowed — this key can call nothing.
             </p>
